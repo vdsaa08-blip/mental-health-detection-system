@@ -1,173 +1,161 @@
 import streamlit as st
 import joblib
 import re
+import string
 import nltk
-import speech_recognition as sr
-import time
 from nltk.corpus import stopwords
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import speech_recognition as sr
+import numpy as np
+from scipy.sparse import hstack
 
 # ===============================
-# 🧩 Setup
+# Setup
 # ===============================
+st.set_page_config(page_title="Mental Health Emotion Detector", page_icon="🧠", layout="wide")
+nltk.download('stopwords', quiet=True)
+
+# Load Model and Vectorizer
 @st.cache_resource
-def download_nltk_data():
-    nltk.download('stopwords')
+def load_assets():
+    model = joblib.load("model/emotion_model_final.pkl")
+    vectorizer = joblib.load("model/tfidf_vectorizer.pkl")
+    emotion_labels = {
+        "anger": "😡",
+        "fear": "😨",
+        "joy": "😄",
+        "love": "❤️",
+        "sadness": "😢",
+        "surprise": "😮"
+    }
+    return model, vectorizer, emotion_labels
 
-download_nltk_data()
-# Load ML model and vectorizer
-model = joblib.load("model/emotion_model.pkl")
-vectorizer = joblib.load("model/tfidf_vectorizer.pkl")
+model, vectorizer, emotion_labels = load_assets()
+vader = SentimentIntensityAnalyzer()
 
-# Streamlit Config
-st.set_page_config(page_title="AI Mental Health Detector", page_icon="🧠", layout="wide")
-
-# ===============================
-# 🎨 Custom CSS Styling
-# ===============================
-st.markdown("""
-<style>
-body {
-    background: linear-gradient(120deg, #a1c4fd, #c2e9fb);
-}
-.main-title {
-    text-align: center;
-    color: #2E8B57;
-    font-size: 45px;
-    font-weight: bold;
-    animation: fadeIn 1.5s;
-}
-.sub-title {
-    text-align: center;
-    color: #444;
-    font-size: 18px;
-}
-@keyframes fadeIn {
-  from {opacity: 0;}
-  to {opacity: 1;}
-}
-.result-box {
-    padding: 25px;
-    border-radius: 15px;
-    text-align: center;
-    color: white;
-    font-weight: bold;
-    font-size: 28px;
-    margin-top: 15px;
-}
-.voice-btn {
-    display: flex;
-    justify-content: center;
-    margin-top: 20px;
-}
-</style>
-""", unsafe_allow_html=True)
+# Stopwords (keep negations)
+stop_words = set(stopwords.words('english'))
+negation_words = {'no', 'not', 'nor', 'ain', 'aren', "aren't", 'couldn', "couldn't",
+                  'didn', "didn't", 'doesn', "doesn't", 'hadn', "hadn't", 'hasn',
+                  "hasn't", 'haven', "haven't", 'isn', "isn't", 'wasn', "wasn't",
+                  'weren', "weren't", 'won', "won't", 'wouldn', "wouldn't"}
+final_stop_words = stop_words - negation_words
 
 # ===============================
-# 🧠 Header
-# ===============================
-st.markdown("<h1 class='main-title'>🧠 AI Mental Health Emotion Detector</h1>", unsafe_allow_html=True)
-st.markdown("<p class='sub-title'>Analyze your emotions through text or voice — powered by AI</p><br>", unsafe_allow_html=True)
-
-# ===============================
-# 🧹 Helper Functions
+# Helper Functions
 # ===============================
 def clean_text(text):
-    text = re.sub(r'http\S+', '', text)
-    text = re.sub(r'[^a-zA-Z\s]', '', text)
     text = text.lower()
-    text = ' '.join([w for w in text.split() if w not in stopwords.words('english')])
-    return text
+    text = re.sub(f"[{re.escape(string.punctuation)}]", "", text)
+    return " ".join([w for w in text.split() if w not in final_stop_words])
 
-# Speech recognition setup
+def predict_emotion(text):
+    cleaned = clean_text(text)
+    vectorized = vectorizer.transform([cleaned])
+    
+    # Add VADER compound score
+    v_score = vader.polarity_scores(text)['compound']
+    v_score_array = np.array([[v_score]])
+    
+    X_final = hstack([vectorized, v_score_array])
+    
+    model_pred = model.predict(X_final)[0]
+
+    # Rule-based VADER override
+    positive_labels = {"joy", "love", "surprise"}
+    negative_labels = {"sadness", "anger", "fear"}
+    if v_score <= -0.35 and model_pred in positive_labels:
+        final_pred = "sadness"
+    elif v_score >= 0.35 and model_pred in negative_labels:
+        final_pred = "joy"
+    else:
+        final_pred = model_pred
+
+    return final_pred, vader.polarity_scores(text)
+
+# ===============================
+# Voice Recording
+# ===============================
 recognizer = sr.Recognizer()
+mic = sr.Microphone()
 
-def record_and_transcribe():
-    with sr.Microphone() as source:
-        st.info("🎙️ Listening... Speak for up to 10 seconds.")
-        audio = recognizer.listen(source, phrase_time_limit=10)
+if "voice_text" not in st.session_state:
+    st.session_state["voice_text"] = ""
+
+def record_voice():
+    with mic as source:
+        recognizer.adjust_for_ambient_noise(source)
+        st.info("🎙️ Recording... Speak now.")
+        audio = recognizer.listen(source)  # no time limit
         try:
             text = recognizer.recognize_google(audio)
             return text
         except sr.UnknownValueError:
-            st.warning("⚠️ Could not understand audio.")
+            st.warning("Could not understand audio.")
             return ""
         except sr.RequestError:
-            st.error("❌ Could not connect to Speech API.")
+            st.error("Speech API unavailable.")
             return ""
 
-# Initialize session state
-if "voice_text" not in st.session_state:
-    st.session_state["voice_text"] = ""
-
 # ===============================
-# ✍️ / 🎤 Input Section
+# UI
 # ===============================
-col1, col2 = st.columns(2)
+st.markdown("""
+<h1 style='text-align:center;color:#2E8B57;'>🧠 Mental Health Emotion Detector</h1>
+<p style='text-align:center;color:#555;'>Analyze emotions from text or voice with AI</p>
+""", unsafe_allow_html=True)
 
+# Determine the initial value for the text area.
+# If there's text from a voice recording, use that.
+initial_text = st.session_state.get("text_area", "")
+if "voice_transcription" in st.session_state:
+    initial_text = st.session_state.pop("voice_transcription")
+
+col1, col2 = st.columns([2,1])
+
+# Text Input
 with col1:
-    st.subheader("✍️ Type Your Feelings")
-    typed_text = st.text_area("Write here:", height=180, placeholder="How are you feeling today?")
+    st.subheader("✍️ Type Your Text")
+    text_input = st.text_area("Enter your message here:", height=180)
+    text_input = st.text_area("Enter your message here:", value=initial_text, height=180, key="text_area")
 
+# Voice Input
 with col2:
-    st.subheader("🎤 Voice Mode")
+    st.subheader("🎤 Voice Input")
+    if st.button("🎙️ Record Voice"):
+        st.session_state["voice_text"] = record_voice()
+        if st.session_state["voice_text"]:
+            st.success(f"🗣️ You said: {st.session_state['voice_text']}")
+        transcribed_text = record_voice()
+        if transcribed_text:
+            st.session_state["voice_transcription"] = transcribed_text
+            st.success(f"🗣️ You said: \"{transcribed_text}\"")
+            st.rerun()
 
-    if st.button("🎙️ Record Voice (10s)"):
-        with st.spinner("Converting speech to text..."):
-            text = record_and_transcribe()
-            if text:
-                st.session_state["voice_text"] = text
-                st.success("🗣️ You said: " + text)
-                st.rerun() # Rerun to update the display immediately
+# Final Text (voice or typed)
+final_text = text_input.strip() or st.session_state.get("voice_text", "").strip()
 
-if st.session_state["voice_text"]:
-    st.info(f"🗣️ Last voice input: {st.session_state['voice_text']}")
-
-# ===============================
-# 🔍 Predict Emotion
-# ===============================
+# Prediction
 st.markdown("<hr>", unsafe_allow_html=True)
-st.subheader("💭 Analyze Emotion")
+st.subheader("💭 Predict Emotion")
 
-final_text = typed_text if typed_text.strip() != "" else st.session_state["voice_text"]
-
-if st.button("🔮 Analyze Now"):
-    if final_text.strip() == "":
-        st.warning("⚠️ Please type or record some input first.")
+if st.button("🔮 Analyze Emotion"):
+    if not final_text:
+    if not text_input.strip():
+        st.warning("⚠️ Please enter text or record your voice first.")
     else:
-        cleaned = clean_text(final_text)
-        vectorized = vectorizer.transform([cleaned])
-        prediction = model.predict(vectorized)[0]
+        pred, vader_scores = predict_emotion(final_text)
+        pred, vader_scores = predict_emotion(text_input)
+        emoji = emotion_labels.get(pred, "❓")
+        st.markdown(f"<h2 style='text-align:center;color:#fff;background-color:#4CAF50;padding:15px;border-radius:10px;'>Predicted Emotion: {pred.upper()} {emoji}</h2>", unsafe_allow_html=True)
 
-        # Emotion color mapping
-        emotion_colors = {
-            "sadness": "#2196F3",
-            "joy": "#4CAF50",
-            "anger": "#F44336",
-            "fear": "#9C27B0",
-            "love": "#FF9800",
-            "surprise": "#E91E63",
-            "neutral": "#607D8B"
-        }
-        color = emotion_colors.get(prediction, "#333")
+        with st.expander("📊 Detailed VADER Scores"):
+            st.write(vader_scores)
+            st.markdown(f"""
+            - **Positive:** `{vader_scores['pos']:.2f}`
+            - **Neutral:** `{vader_scores['neu']:.2f}`
+            - **Negative:** `{vader_scores['neg']:.2f}`
+            - **Compound Score:** `{vader_scores['compound']:.2f}`
+            """)
 
-        st.markdown(f"""
-        <div class='result-box' style='background-color:{color};'>
-            Predicted Emotion: {prediction.upper()}
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Optional delay + emoji feedback
-        time.sleep(0.3)
-        emojis = {
-            "joy": "😊",
-            "sadness": "😢",
-            "anger": "😠",
-            "fear": "😨",
-            "love": "❤️",
-            "surprise": "😲",
-            "neutral": "😐"
-        }
-        emoji = emojis.get(prediction, "🙂")
-        st.markdown(f"<h2 style='text-align:center;'>Your mood: {emoji}</h2>", unsafe_allow_html=True)
-
-st.markdown("<br><hr><p style='text-align:center; color:#555;'>Made with ❤️ using Streamlit, SpeechRecognition & ML</p>", unsafe_allow_html=True)
+st.markdown("<hr><p style='text-align:center;color:#555;'>Made with ❤️ using Streamlit + SpeechRecognition + ML</p>", unsafe_allow_html=True)

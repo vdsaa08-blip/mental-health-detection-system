@@ -5,3 +5,4 @@ nltk
 joblib
 numpy
 speechrecognition
+vaderSentiment
