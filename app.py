@@ -116,35 +116,27 @@ col1, col2 = st.columns([2,1])
 # Text Input
 with col1:
     st.subheader("✍️ Type Your Text")
-    text_input = st.text_area("Enter your message here:", height=180)
     text_input = st.text_area("Enter your message here:", value=initial_text, height=180, key="text_area")
 
 # Voice Input
 with col2:
     st.subheader("🎤 Voice Input")
     if st.button("🎙️ Record Voice"):
-        st.session_state["voice_text"] = record_voice()
-        if st.session_state["voice_text"]:
-            st.success(f"🗣️ You said: {st.session_state['voice_text']}")
-        transcribed_text = record_voice()
-        if transcribed_text:
-            st.session_state["voice_transcription"] = transcribed_text
-            st.success(f"🗣️ You said: \"{transcribed_text}\"")
-            st.rerun()
-
-# Final Text (voice or typed)
-final_text = text_input.strip() or st.session_state.get("voice_text", "").strip()
+        with st.spinner("Recording..."):
+            transcribed_text = record_voice()
+            if transcribed_text:
+                st.session_state["voice_transcription"] = transcribed_text
+                st.success(f"🗣️ You said: \"{transcribed_text}\"")
+                st.rerun()
 
 # Prediction
 st.markdown("<hr>", unsafe_allow_html=True)
 st.subheader("💭 Predict Emotion")
 
 if st.button("🔮 Analyze Emotion"):
-    if not final_text:
     if not text_input.strip():
         st.warning("⚠️ Please enter text or record your voice first.")
     else:
-        pred, vader_scores = predict_emotion(final_text)
         pred, vader_scores = predict_emotion(text_input)
         emoji = emotion_labels.get(pred, "❓")
         st.markdown(f"<h2 style='text-align:center;color:#fff;background-color:#4CAF50;padding:15px;border-radius:10px;'>Predicted Emotion: {pred.upper()} {emoji}</h2>", unsafe_allow_html=True)
